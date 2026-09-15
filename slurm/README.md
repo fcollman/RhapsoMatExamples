@@ -196,18 +196,49 @@ written. There is no resume; rerun with a fresh `--out`.
 
 ## 6. Performance
 
-The dominant cost is **not** compute. The `.mat` files are chunked
-`(41, 1, 191)` — 62 KB, one voxel thick in y — so a 256×256 lateral block needs
-~1,792 separate ranged GETs per contributing tile. A 16-tile run is roughly
-400,000 individual requests. Measured locally against S3, the Ray workers sat
-at under 10% total CPU: the job was latency-bound on tiny reads, not
-bandwidth- or compute-bound.
+The dominant cost is reading tile data from S3, and the limit is **aggregate
+bandwidth on the node's path to the bucket** — not CPU, and not request count.
 
-Two levers, in order of effect:
+Measured from one workstation against this bucket (us-east-2):
 
-**Stage the tiles to node-local disk first.** One bulk 1.57 GB sequential read
-per tile beats 25,000 random ones by a wide margin. If every node has the tiles
-locally, point `--s3-prefix` at the local directory:
+| request pattern | throughput |
+|---|---|
+| 1 x 100 MB contiguous GET | 1.6 MB/s |
+| 1 x 16 MB contiguous GET | 2.6 - 3.2 MB/s |
+| 4 x 16 MB in parallel | 4.2 MB/s |
+| **16 x 4 MB in parallel** | **6.4 MB/s** |
+| 64 x 1 MB in parallel | 6.0 MB/s |
+| the reader as it ships (chunk by chunk) | 6.2 MB/s |
+
+A single stream gets 2-3 MB/s; the pipe only fills with many requests in
+flight, saturating near 6 MB/s. **The reader already sits at that ceiling.**
+
+Two consequences that are easy to get backwards:
+
+- **Fewer, larger reads are not better.** The `.mat` chunks are 98.2%
+  contiguous on disk, so merging them into a handful of large reads is very
+  possible — and it does not help. Doing so cuts concurrency, which is the only
+  thing filling the pipe, so it trends toward the 2.6 MB/s single-stream rate.
+  This was measured, not assumed: kerchunk references through fsspec's
+  `ReferenceFileSystem` (which merges ranges within `max_gap`, default 64 KB)
+  read an identical slab in 18.2s versus 18.2s for the shipping reader, and
+  disabling merging entirely (`max_gap=0`) gave 18.6s.
+- **Bigger `--block-size` does not reduce bytes read.** It changes memory use
+  and how coarsely work is divided, nothing more.
+
+### What actually helps
+
+**More nodes.** Each node has its own path to S3, so aggregate throughput
+scales with node count until you hit a site egress limit or an S3 ceiling. On
+these numbers that is the single biggest lever: ~25 GB for 16 tiles and ~200 GB
+for the full mosaic, divided across nodes.
+
+**Keeping blocks concurrent.** Ray runs `--cpus-per-task` CPUs worth of blocks
+at once. Lowering `CPUS_PER_BLOCK` raises the number of concurrent blocks and
+so the number of in-flight requests — useful while the job is network-bound,
+provided memory allows (see Things that bite).
+
+**Staging tile data to node-local disk**, if your nodes have the scratch space:
 
 ```bash
 # in your sbatch, before the fusion step
@@ -220,13 +251,25 @@ srun --ntasks-per-node=1 bash -c '
 fuse-mat-tiles --s3-prefix /local/$USER/tiles ...
 ```
 
-This costs 25 GB per node for 16 tiles, so it suits deep runs on few nodes
-better than wide ones.
+This wins because `aws s3 sync` transfers many objects with its own multipart
+concurrency, and because blocks that re-read overlapping tiles then hit local
+disk instead of the network. It costs ~1.6 GB per tile per node, so it suits
+deep runs on few nodes better than wide ones.
 
-**More nodes.** Because the bottleneck is request latency rather than
-bandwidth, adding nodes does help — each contributes its own concurrent
-requests. Scaling is closer to linear here than it would be for a
-bandwidth-bound job, up to whatever S3 request ceiling your network imposes.
+### Measure it on your own cluster first
 
-Raising `--block-size` does *not* reduce the request count (the same chunks are
-read either way); it only reduces per-block overhead and raises memory use.
+The table above is one workstation's link and is almost certainly pessimistic
+for a compute node. Get your own number before sizing the job:
+
+```bash
+U=https://apex-connects.s3.us-east-2.amazonaws.com/CMC/Derivatives/Vlad/PS-OCT/3DTiles/Cross/150/slice_150_tile_001_Cross.mat
+srun --nodes=1 --ntasks=1 bash -c '
+  for i in $(seq 0 15); do
+    o=$((5104 + i*4194304)); curl -s -o /dev/null -r $o-$((o+4194303)) "'"$U"'" &
+  done; time wait'
+```
+
+16 parallel 4 MB reads = 67 MB. Divide by the elapsed time for your per-node
+ceiling, then: total bytes / (per-node MB/s x nodes) is the transfer floor for
+the run. At 6 MB/s per node, the full 126-tile mosaic (~200 GB) is ~9 hours on
+one node and roughly an hour on eight.
