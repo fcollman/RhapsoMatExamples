@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -253,33 +254,42 @@ class MatTileView:
         return np.transpose(self._array[x_slice, y_slice, z_slice], (2, 1, 0))
 
 
-# Per-process caches, so each Ray worker parses the template at most once and
-# rebuilds each tile's manifest at most once.
-_TEMPLATE_CACHE: dict = {}
+# Per-process cache of opened tiles. The template itself is parsed once by the
+# driver and shipped to the workers, so nothing here re-reads a chunk index.
 _TILE_CACHE: dict = {}
 
 
-def template_array(template_url: str):
-    """The reference ManifestArray whose byte offsets every tile shares."""
-    if template_url not in _TEMPLATE_CACHE:
-        store = open_mat(template_url)
-        _TEMPLATE_CACHE[template_url] = root_group(store).arrays[MAT_VARIABLE]
-    return _TEMPLATE_CACHE[template_url]
+def parse_template(template_url: str):
+    """
+    Parse the reference .mat whose byte offsets every tile shares.
+
+    Called ONCE, in the driver. The resulting ManifestArray pickles to a few
+    MB, so Ray ships it to the workers through its object store -- far cheaper
+    than having every worker walk the HDF5 chunk index itself, which over S3
+    costs ~110s each and would mean thousands of simultaneous range reads at
+    startup on a large cluster.
+    """
+    return root_group(open_mat(template_url)).arrays[MAT_VARIABLE]
 
 
-def open_tile(url: str, template_url: str | None, region: str | None):
-    """Open one .mat tile as a zarr array, via the shared template if given."""
+def open_tile(url: str, template, region: str | None):
+    """
+    Open one .mat tile as a zarr array.
+
+    `template` is the pre-parsed ManifestArray, or None to parse this tile's
+    own chunk index (correct for a heterogeneous set, much slower over S3).
+    """
     if url in _TILE_CACHE:
         return _TILE_CACHE[url]
 
     registry = make_registry(url, region=region)
 
-    if template_url:
+    if template is not None:
         from virtualizarr.manifests import ManifestGroup, ManifestStore
 
-        array = template_array(template_url).rename_paths(url)
         store = ManifestStore(
-            ManifestGroup(arrays={MAT_VARIABLE: array}), registry=registry
+            ManifestGroup(arrays={MAT_VARIABLE: template.rename_paths(url)}),
+            registry=registry,
         )
     else:
         store = open_mat(url, registry)
@@ -296,16 +306,16 @@ class MatFuseCell(FuseCell):
     stored. Blending, sampling, and the instruction set are stock Rhapso.
     """
 
-    def __init__(self, *args, template_url=None, region=None,
+    def __init__(self, *args, template=None, region=None,
                  out_dtype="float32", **kwargs):
         super().__init__(*args, **kwargs)
-        self.template_url = template_url
+        self.template = template
         self.region = region
         self.out_dtype = np.dtype(out_dtype)
 
     def open_view_dataset(self, view_id, mode="r"):
         url = self.per_view_transforms[view_id]["path"]
-        return MatTileView(open_tile(url, self.template_url, self.region))
+        return MatTileView(open_tile(url, self.template, self.region))
 
     def run(self):
         block_min = self.grid_block[0]
@@ -343,7 +353,7 @@ class MatFuseCell(FuseCell):
 
 @ray.remote(num_cpus=2)
 def fuse_grid_block(grid_block, bb_min, bb_max, per_view_transforms, output_path,
-                    strategy, template_url, region, out_dtype):
+                    strategy, template, region, out_dtype):
     offset = grid_block[0] + bb_min
 
     views, fused_min, fused_max = OverlappingViews(
@@ -365,7 +375,7 @@ def fuse_grid_block(grid_block, bb_min, bb_max, per_view_transforms, output_path
     MatFuseCell(
         instructions, blocks, per_view_transforms, output_path, grid_block,
         bb_min, bb_max, strategy,
-        template_url=template_url, region=region, out_dtype=out_dtype,
+        template=template, region=region, out_dtype=out_dtype,
     ).run()
 
     return len(views)
@@ -595,7 +605,7 @@ def main(argv=None) -> None:
 
     template_url = resolve_template(args, tiles, per_view_transforms)
     if template_url:
-        origin = "local" if template_url.startswith("file://") else "S3 (~110s)"
+        origin = "local" if template_url.startswith("file://") else "S3"
         print(f"Chunk template : {template_url}  [{origin}]")
 
     region = (bucket_region(args.s3_prefix.split("/")[2])
@@ -641,11 +651,25 @@ def main(argv=None) -> None:
     print(f"Ray cluster    : {int(resources.get('CPU', 0))} CPUs across "
           f"{len(ray.nodes())} node(s)\n")
 
+    # Parse the shared chunk index once here, then hand the workers a
+    # reference to it. Every tile in this dataset has the same internal HDF5
+    # layout, so one parse plus a path rewrite per tile replaces N chunk-index
+    # walks -- the difference between seconds and hours over S3.
+    template_ref = None
+    if template_url:
+        started = time.time()
+        template = parse_template(template_url)
+        elapsed = time.time() - started
+        n_chunks = int(np.prod(template.manifest.shape_chunk_grid))
+        print(f"Parsed template: {n_chunks:,} chunks in {elapsed:.1f}s "
+              f"-> shared with all workers")
+        template_ref = ray.put(template)
+
     task = fuse_grid_block.options(num_cpus=args.cpus_per_task)
     futures = [
         task.remote(
             grid_block, bb_min, bb_max, per_view_transforms, str(output_path),
-            args.strategy, template_url, region, args.dtype,
+            args.strategy, template_ref, region, args.dtype,
         )
         for grid_block in grid
     ]

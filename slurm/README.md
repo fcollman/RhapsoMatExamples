@@ -43,21 +43,20 @@ module load python/3.12
 
 ### Data
 
-The S3 bucket is public, so **no AWS credentials are needed** — the reader
-requests anonymously. If your cluster blocks outbound HTTPS from compute
-nodes, stage the tiles first (see Performance below).
+Nothing to stage. The S3 bucket is public, so **no AWS credentials are
+needed** — the reader requests anonymously, and the chunk layout is read
+straight from the first tile in the bucket.
 
-Stage the chunk template on shared storage so every worker can read it
-without a 110s S3 parse:
+The driver parses that layout once (~110s over S3: it walks a 25,000-entry
+HDF5 chunk index, which is thousands of small latency-bound reads), then hands
+the result to every worker through Ray's object store as a ~3 MB object. So it
+is paid once per job, not once per worker — a one-time cost against a run
+measured in hours.
 
-```bash
-mkdir -p data
-aws s3 cp --no-sign-request \
-  s3://apex-connects/CMC/Derivatives/Vlad/PS-OCT/3DTiles/Cross/150/slice_150_tile_001_Cross.mat \
-  data/
-```
-
-`fuse-mat-tiles` finds it there automatically.
+If your cluster blocks outbound HTTPS from compute nodes, or you want to avoid
+the per-request latency entirely, stage the tile *data* to node-local disk —
+see [Performance](#6-performance). That is about throughput, not about the
+chunk layout.
 
 ---
 

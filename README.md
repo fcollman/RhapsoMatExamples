@@ -127,12 +127,18 @@ against tile 2's, which peaks at lag 899 for a nominal 900 offset.
 The fusion step is subclassed here to write **float32** by default.
 
 **Identical layouts.** Every `.mat` in this dataset shares the same internal
-HDF5 layout, so the chunk manifest is built once from a reference file and
-stamped onto the rest with `rename_paths()`. Parsing one `.mat` locally takes
-~0.2s; over S3 it takes ~110s, because walking the HDF5 chunk index is
-thousands of tiny latency-bound reads. Keep a local copy in `data/` and the
-whole mosaic's manifests cost a fraction of a second. Use `--no-template` for a
-heterogeneous set.
+HDF5 layout, so the chunk manifest is built once from a reference tile and
+stamped onto the rest with `rename_paths()` — a path rewrite, no re-parsing.
+The driver does that parse itself and ships the ~3 MB result to the workers
+through Ray's object store, so the cost is paid once per job rather than once
+per worker.
+
+The reference tile can be the first one in the bucket; nothing needs to be
+downloaded. A local copy in `data/` only makes that single parse faster (~0.2s
+versus ~110s, since walking a 25,000-entry HDF5 chunk index over S3 is
+thousands of tiny latency-bound reads) and is worth having when you iterate,
+but it is never required. Use `--template` to point at a specific reference, or
+`--no-template` to parse every tile separately for a heterogeneous set.
 
 **Sharding and parallel writes.** A Zarr v3 shard is stored as one object, so
 writing any chunk inside it rewrites the whole shard. Fusion tasks run
