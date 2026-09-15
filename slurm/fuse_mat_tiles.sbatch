@@ -56,10 +56,38 @@ echo "output     : $OUTPUT"
 NODES=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 HEAD_NODE="${NODES[0]}"
 
-# Resolve an address the workers can reach. Many clusters have a separate
-# high-speed interface; prefer the first routable address for the head host.
-HEAD_IP=$(srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" hostname --ip-address \
-          | awk '{print $1}')
+# Resolve the head node's IP.
+#
+# Do NOT use `srun ... hostname --ip-address` here: some compute images ship
+# without the hostname binary, which fails as
+#   execve(): hostname: No such file or directory
+# Resolving from the submit node needs no job step at all, and getent is part
+# of glibc so it is present essentially everywhere.
+#
+# Override with RAY_HEAD_IP=... if your cluster has a separate high-speed
+# interface and name resolution returns the wrong one.
+resolve_head_ip() {
+    local host="$1" ip=""
+
+    ip=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')
+    [ -z "$ip" ] && ip=$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')
+
+    # Last resort: ask Python, which is guaranteed present via the venv.
+    if [ -z "$ip" ]; then
+        ip=$("$VENV/bin/python" -c \
+            'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' \
+            "$host" 2>/dev/null)
+    fi
+
+    if [ -z "$ip" ]; then
+        echo "Could not resolve an IP for head node '$host'." >&2
+        echo "Set RAY_HEAD_IP=<ip> and resubmit." >&2
+        exit 1
+    fi
+    echo "$ip"
+}
+
+HEAD_IP="${RAY_HEAD_IP:-$(resolve_head_ip "$HEAD_NODE")}"
 PORT=${RAY_PORT:-6379}
 RAY_ADDRESS="$HEAD_IP:$PORT"
 
@@ -124,6 +152,9 @@ export PYTHONUNBUFFERED=1
 export RAY_ADDRESS
 
 echo "starting fusion"
+# `set -e` is off for this one command: a failed fusion must still fall through
+# to the teardown below, or the Ray cluster keeps the allocation until walltime.
+set +e
 "$VENV/bin/fuse-mat-tiles" \
     --yaml manifests/test.yaml \
     --out "$OUTPUT" \
@@ -131,6 +162,7 @@ echo "starting fusion"
     --cpus-per-task "${CPUS_PER_BLOCK:-2}" \
     "$@"
 status=$?
+set -e
 
 # ---------------------------------------------------------------------------
 # 4. Tear down
