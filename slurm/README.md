@@ -119,10 +119,24 @@ slurm/submit_fusion.sh <jobid> --limit 64 --out data/b.zarr
 scancel <jobid>                                  # release the nodes
 ```
 
-`submit_fusion.sh` runs the driver wherever you invoke it — a login node is
-fine, since it only submits tasks and waits. For long runs use `tmux` or
-`nohup`, or wrap it in a small single-core sbatch if your site forbids
-long-lived login-node processes.
+`submit_fusion.sh` must be *invoked* from wherever you like, but it places the
+driver **inside the cluster's allocation** with
+`srun --jobid=<cluster job> --overlap`, on the head node.
+
+That is not optional. `ray.init(address=...)` reaches the GCS over TCP, but the
+driver then attaches to a raylet through a **local Unix socket**. A login node
+has no raylet, so running the driver there fails with:
+
+```
+raylet_ipc_client.cc:85: Failed to connect to socket at address:
+/tmp/ray-<jobid>/session_*/sockets/raylet
+```
+
+The `--overlap` flag is also required: without it `srun` blocks waiting for
+resources that the `ray start --block` steps already hold.
+
+The script itself just waits on the step, so run it under `tmux` or `nohup` for
+long jobs.
 
 ---
 

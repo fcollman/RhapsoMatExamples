@@ -115,7 +115,15 @@ print(f"cluster ready: {len([n for n in ray.nodes() if n['Alive']])}/{expected} 
       f"nodes, {int(ray.cluster_resources().get('CPU', 0))} CPUs")
 PY
 
-echo "$RAY_ADDRESS" > "$ADDRESS_FILE"
+# Record everything a submitter needs. The head node name matters as much as
+# the address: a driver must run ON a node that has a raylet, so submit_fusion
+# uses `srun --jobid` to place it inside this allocation.
+cat > "$ADDRESS_FILE" <<EOF
+RAY_ADDRESS=$RAY_ADDRESS
+HEAD_NODE=$HEAD_NODE
+CLUSTER_JOB_ID=$SLURM_JOB_ID
+RAY_TMPDIR=$RAY_TMPDIR
+EOF
 echo "address written to $ADDRESS_FILE"
 echo "submit work with: slurm/submit_fusion.sh $SLURM_JOB_ID [fuse-mat-tiles args]"
 
