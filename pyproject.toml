@@ -1,0 +1,64 @@
+[project]
+name = "rhapso-mat-examples"
+version = "0.1.0"
+description = "Fuse MATLAB v7.3 tile mosaics with Rhapso, reading the .mat files in place as virtual Zarr"
+# icechunk requires >=3.12.
+requires-python = ">=3.12"
+dependencies = [
+    "rhapso",
+    "numpy>=2.1",
+    "scipy>=1.15",
+    "zarr>=3.3",
+    "ray>=2.40",
+    "virtualizarr>=2.7",
+    "icechunk>=2.2",
+    "obstore>=0.8",
+    "h5py>=3.11",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+mat-info = "rhapso_mat_examples.mat_info:main"
+fuse-mat-tiles = "rhapso_mat_examples.fuse_mat_tiles:main"
+make-demo-tiles = "rhapso_mat_examples.make_demo_tiles:main"
+fuse-demo-tiles = "rhapso_mat_examples.fuse_tiles:main"
+serve-zarr = "rhapso_mat_examples.serve_zarr:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rhapso_mat_examples"]
+
+# Rhapso comes from PyPI. To develop against a local checkout instead, add:
+#   [tool.uv.sources]
+#   rhapso = { path = "../Rhapso", editable = true }
+# The overrides below are needed either way.
+
+[tool.uv]
+# Rhapso's pins cannot coexist with the VirtualiZarr/Icechunk stack as written.
+# Each override below was verified by resolving and importing, not assumed:
+#
+#   bioio==1.3.0      Rhapso pulls it in for TIFF reading, which affine fusion
+#                     never touches. It pins numpy<2.0 (vs virtualizarr's
+#                     numpy>=2.1) AND imageio<2.28 (which blocks any modern
+#                     scikit-image). It is the single biggest blocker, so it is
+#                     dropped outright with a marker that is never true.
+#   ray==2.9.1        No wheels past cp311, but icechunk needs Python >=3.12.
+#   scipy==1.13.1     Built against numpy<2.3; with numpy 2.5 it emits an ABI
+#                     warning, and FuseCell depends on scipy.ndimage.
+#   zarr<3.2          Not actually a conflict -- virtualizarr needs >=3.1.6, so
+#                     3.1.x satisfies both. Raised anyway because the pipeline
+#                     here was tested end to end on zarr 3.3.0.
+#
+# Nothing in Rhapso.affine_fusion imports bioio, and the fusion components are
+# plain NumPy/SciPy/zarr code that runs fine on the newer versions.
+override-dependencies = [
+    "bioio; sys_platform == 'never'",
+    "bioio-tifffile; sys_platform == 'never'",
+    "numpy>=2.1",
+    "ray>=2.40",
+    "scipy>=1.15",
+    "zarr>=3.3",
+]
