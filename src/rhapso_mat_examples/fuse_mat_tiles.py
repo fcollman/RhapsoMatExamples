@@ -55,6 +55,7 @@ know your values are non-negative integers.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 
@@ -538,6 +539,14 @@ def build_parser() -> argparse.ArgumentParser:
                              "shard per fusion task.")
     parser.add_argument("--no-shard", action="store_true",
                         help="Write unsharded, one file per chunk.")
+    parser.add_argument("--ray-address", default=os.environ.get("RAY_ADDRESS"),
+                        help="Attach to an existing Ray cluster instead of "
+                             "starting a local one. Use 'auto' on a node that "
+                             "is part of the cluster, or host:port. Defaults "
+                             "to $RAY_ADDRESS. See slurm/ for a SLURM example.")
+    parser.add_argument("--cpus-per-task", type=float, default=2,
+                        help="CPUs Ray reserves per fusion block. Controls how "
+                             "many blocks run at once, and so peak memory.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report the plan and exit without fusing.")
     return parser
@@ -622,9 +631,19 @@ def main(argv=None) -> None:
     create_output(output_path, dims, args.chunk_size, dtype, shard_size,
                   resolution_xyz=resolution, bb_min_xyz=bb_min)
 
-    ray.init()
+    if args.ray_address:
+        print(f"Attaching to Ray cluster at {args.ray_address}")
+        ray.init(address=args.ray_address)
+    else:
+        ray.init()
+
+    resources = ray.cluster_resources()
+    print(f"Ray cluster    : {int(resources.get('CPU', 0))} CPUs across "
+          f"{len(ray.nodes())} node(s)\n")
+
+    task = fuse_grid_block.options(num_cpus=args.cpus_per_task)
     futures = [
-        fuse_grid_block.remote(
+        task.remote(
             grid_block, bb_min, bb_max, per_view_transforms, str(output_path),
             args.strategy, template_url, region, args.dtype,
         )

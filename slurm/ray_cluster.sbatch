@@ -1,0 +1,92 @@
+#!/bin/bash
+# Start a long-lived Ray cluster on a SLURM allocation and hold it open, so you
+# can submit several fusion jobs into the same cluster.
+#
+#   sbatch slurm/ray_cluster.sbatch                 # start it
+#   cat ray_cluster_<jobid>.address                 # the address it wrote
+#   slurm/submit_fusion.sh <jobid> --limit 16       # run a job on it
+#   scancel <jobid>                                 # shut it down
+#
+# Use slurm/fuse_mat_tiles.sbatch instead when you only have one job to run --
+# it starts a cluster, runs the fusion, and tears down in a single allocation.
+#
+#SBATCH --job-name=ray-cluster
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=192G
+#SBATCH --time=12:00:00
+#SBATCH --output=logs/ray-cluster-%j.out
+#SBATCH --error=logs/ray-cluster-%j.out
+
+set -euo pipefail
+
+PROJECT_DIR="${PROJECT_DIR:-$SLURM_SUBMIT_DIR}"
+VENV="${VENV:-$PROJECT_DIR/.venv}"
+
+# Node-local, never a shared filesystem -- Ray's raylet sockets live here.
+RAY_TMPDIR="${RAY_TMPDIR:-/tmp/ray-$SLURM_JOB_ID}"
+
+# The address file must be somewhere the submitting host can read, so this one
+# does belong on shared storage.
+ADDRESS_FILE="$PROJECT_DIR/ray_cluster_${SLURM_JOB_ID}.address"
+
+cd "$PROJECT_DIR"
+mkdir -p logs
+
+NODES=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
+HEAD_NODE="${NODES[0]}"
+HEAD_IP=$(srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" hostname --ip-address \
+          | awk '{print $1}')
+PORT=${RAY_PORT:-6379}
+RAY_ADDRESS="$HEAD_IP:$PORT"
+WORKER_CPUS=$(( SLURM_CPUS_PER_TASK - 1 ))
+
+echo "job     : $SLURM_JOB_ID"
+echo "head    : $HEAD_NODE ($RAY_ADDRESS)"
+echo "nodes   : $SLURM_JOB_NUM_NODES"
+
+cleanup() {
+    echo "shutting down ray"
+    for node in "${NODES[@]}"; do
+        srun --nodes=1 --ntasks=1 -w "$node" "$VENV/bin/ray" stop --force || true
+    done
+    rm -f "$ADDRESS_FILE"
+}
+trap cleanup EXIT
+
+srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" \
+    "$VENV/bin/ray" start --head \
+        --node-ip-address="$HEAD_IP" --port="$PORT" \
+        --num-cpus="$WORKER_CPUS" --temp-dir="$RAY_TMPDIR" \
+        --include-dashboard=false --block &
+sleep 20
+
+for (( i = 1; i < SLURM_JOB_NUM_NODES; i++ )); do
+    srun --nodes=1 --ntasks=1 -w "${NODES[$i]}" \
+        "$VENV/bin/ray" start --address="$RAY_ADDRESS" \
+            --num-cpus="$WORKER_CPUS" --temp-dir="$RAY_TMPDIR" --block &
+    sleep 5
+done
+
+# Publish the address only once the cluster can actually accept work, so a
+# submitter that reads the file immediately does not race the workers.
+"$VENV/bin/python" - "$RAY_ADDRESS" "$SLURM_JOB_NUM_NODES" <<'PY'
+import sys, time, ray
+address, expected = sys.argv[1], int(sys.argv[2])
+ray.init(address=address)
+deadline = time.time() + 300
+while time.time() < deadline:
+    if len([n for n in ray.nodes() if n["Alive"]]) >= expected:
+        break
+    time.sleep(5)
+print(f"cluster ready: {len([n for n in ray.nodes() if n['Alive']])}/{expected} "
+      f"nodes, {int(ray.cluster_resources().get('CPU', 0))} CPUs")
+PY
+
+echo "$RAY_ADDRESS" > "$ADDRESS_FILE"
+echo "address written to $ADDRESS_FILE"
+echo "submit work with: slurm/submit_fusion.sh $SLURM_JOB_ID [fuse-mat-tiles args]"
+
+# Hold the allocation until the walltime runs out or the job is cancelled.
+sleep infinity
