@@ -39,6 +39,8 @@ never touches.
 | `serve-zarr DIR` | Serve a Zarr store with CORS + Range, for Neuroglancer |
 | `make-demo-tiles` / `fuse-demo-tiles` | Synthetic 4-tile example, no `.mat` needed |
 
+Running on SLURM: see [slurm/README.md](slurm/README.md).
+
 ### Inspect a tile
 
 ```bash
