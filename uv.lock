@@ -886,24 +886,6 @@ wheels = [
 ]
 
 [[package]]
-name = "icechunk"
-version = "2.2.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "zarr" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/79/34/413821f7318fb4f290ca195600eb5f70a7081477de6b26da8de7c50a0fc0/icechunk-2.2.0.tar.gz", hash = "sha256:50b82ae35064c1f77ef44dcdc77c13164b11c457cb802aafc402402fe4f38010", size = 3653627, upload-time = "2026-09-02T21:17:06.591Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/84/59/3f0d8794837ffbb84801a6fddbac2d4769d4fb1fd7f38a399937771ab55a/icechunk-2.2.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:6a112b2c2503d2dcdf448c887c54b086515738a039406a4a25d035ce746aaa40", size = 16468873, upload-time = "2026-09-02T21:17:15.171Z" },
-    { url = "https://files.pythonhosted.org/packages/7b/c6/23e1d5beb6859ea6a46b70c5d3dbd76fb9ec820e47e9d3c3e1a48a6571f0/icechunk-2.2.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:8fb1e8b87aa336ac62c48bd5664c67c1143b4a88974674d9fc8e62985a380ed8", size = 15196656, upload-time = "2026-09-02T21:17:12.241Z" },
-    { url = "https://files.pythonhosted.org/packages/a3/d4/76b47ea15675eeaec431da49af6f1d4edb0d742f381e0bff9ce0a4868348/icechunk-2.2.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:620a22d11632c9b6546073e26601e9d9c8a97609bf3cecb7bac262d4cb819395", size = 17135387, upload-time = "2026-09-02T21:17:08.914Z" },
-    { url = "https://files.pythonhosted.org/packages/9b/0d/736023a21f521664f2f8df24e1217930719e87b79574bfb6c4fb0b159861/icechunk-2.2.0-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:15998f5e47260d202f6acce0e7cffeb23a440a8c497b1b9ef2700d5729abf077", size = 16784494, upload-time = "2026-09-02T21:17:03.99Z" },
-    { url = "https://files.pythonhosted.org/packages/f2/69/454799d15c5c48a3c33fb47dcea0f12b1b6fe64ac5b6e41438a12981d575/icechunk-2.2.0-cp312-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:a2f490636291f92eb47bdff51e655278d4de31bbaa3ea0b19a4a052e73e3a799", size = 16997427, upload-time = "2026-09-02T21:17:18.004Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/af/efabafacb04d644655749fadd470e75620f7fcbaa40a548c6e8bcfc6d72d/icechunk-2.2.0-cp312-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:c1dbc4fdaa9e3f2ea931a157222f34213f82475283c30a6be1860e77da1b6078", size = 17594368, upload-time = "2026-09-02T21:17:20.898Z" },
-    { url = "https://files.pythonhosted.org/packages/21/1d/c1cc06828f3e8d3903c5d5094244ae968d0caf9ece5faaf7e6ae8ad9a7e6/icechunk-2.2.0-cp312-abi3-win_amd64.whl", hash = "sha256:1fa568d9d0b79777812ba2e2e815623fe0a90ae1945924271d29e31b2027964c", size = 16135834, upload-time = "2026-09-02T21:17:24.196Z" },
-]
-
-[[package]]
 name = "idna"
 version = "3.19"
 source = { registry = "https://pypi.org/simple" }
@@ -2158,7 +2140,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "h5py" },
-    { name = "icechunk" },
     { name = "numpy" },
     { name = "obstore" },
     { name = "pyyaml" },
@@ -2172,7 +2153,6 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "h5py", specifier = ">=3.11" },
-    { name = "icechunk", specifier = ">=2.2" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "obstore", specifier = ">=0.8" },
     { name = "pyyaml", specifier = ">=6.0" },

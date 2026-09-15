@@ -21,7 +21,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone <your-fork> RhapsoMatExamples
 cd RhapsoMatExamples
 
-# Python 3.12+ is required (icechunk does not build for 3.11).
+# Python 3.12+ is required (virtualizarr and zarr both need it).
 # uv will fetch a standalone interpreter if the site modules are older.
 uv sync --python 3.12
 ```
