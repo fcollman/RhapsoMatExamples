@@ -67,8 +67,8 @@ Both `.sbatch` files need their headers edited — the defaults are generic:
 ```bash
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=192G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32G
 #SBATCH --time=08:00:00
 ```
 
@@ -182,12 +182,32 @@ what makes multi-node writes safe. If you override `--shard-size`, it must
 still divide `--block-size` in X and Y; the tool refuses layouts that would let
 two tasks write one shard.
 
-**Memory.** Each block holds coordinate arrays plus source data for every
-overlapping tile. With the default `--block-size 256 256` and full depth, budget
-roughly 1.5–2 GB per concurrent block. Ray runs `--cpus-per-task` CPUs worth of
-blocks at once, so on a 32-core node with `CPUS_PER_BLOCK=2` that is ~16
-concurrent blocks — size `--mem` accordingly, or raise `CPUS_PER_BLOCK` to run
-fewer at a time.
+**Memory.** Measured peak RSS of a worker rendering one block, worst case
+(two contributing views), full depth:
+
+| `--block-size` | peak RSS per block |
+|---|---|
+| `128 128` | 0.54 GB |
+| `256 256` (default) | **1.4 GB** |
+| `384 384` | 3.0 GB |
+| `512 512` | 4.6 GB |
+
+It scales with block volume (~50-80 bytes per output voxel: the numerator and
+denominator accumulators, three coordinate arrays, their read-space copies, the
+blend weights, and the source chunk). Size the node as:
+
+```
+concurrent blocks = floor(WORKER_CPUS / CPUS_PER_BLOCK)
+--mem            = concurrent blocks x per-block RSS + ~4 GB for Ray
+```
+
+The shipped defaults (16 CPUs, `CPUS_PER_BLOCK=2`) run `15/2 = 7` blocks at
+once: ~10 GB of blocks plus a 2 GB object store, hence `--mem=32G` with room to
+spare. Scale both together — doubling `--cpus-per-task` doubles concurrency and
+so doubles the memory you need.
+
+Note that `--mem` is **per node**, not per task or per worker. One Ray process
+per node forks many workers, and they all share that one node-level budget.
 
 **Walltime.** If the job is killed mid-run the Zarr store is left partially
 written. There is no resume; rerun with a fresh `--out`.

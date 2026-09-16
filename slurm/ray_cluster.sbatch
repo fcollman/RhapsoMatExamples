@@ -11,10 +11,15 @@
 # it starts a cluster, runs the fusion, and tears down in a single allocation.
 #
 #SBATCH --job-name=ray-cluster
+# 16 CPUs / 32 GB is sized from measurement, not habit: this job is bound by
+# S3 bandwidth, not CPU, so a node saturates its link with only a handful of
+# concurrent blocks. WORKER_CPUS=15 / CPUS_PER_BLOCK=2 = 7 blocks x ~1.4 GB
+# peak = ~10 GB, plus a 2 GB object store. Smaller asks also queue sooner --
+# spend the savings on --nodes instead.
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=192G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/ray-cluster-%j.out
 #SBATCH --error=logs/ray-cluster-%j.out
@@ -73,6 +78,21 @@ PORT=${RAY_PORT:-6379}
 RAY_ADDRESS="$HEAD_IP:$PORT"
 WORKER_CPUS=$(( SLURM_CPUS_PER_TASK - 1 ))
 
+# Ray's object store otherwise grabs ~30% of node memory, which counts against
+# the same --mem cgroup the fusion blocks need. This pipeline only ships small
+# objects through it (the ~3 MB chunk template, the transform dict), so a few
+# GB is ample.
+OBJECT_STORE_BYTES="${OBJECT_STORE_BYTES:-2000000000}"
+
+# Ray's dashboard is off by default (one less port, one less process). Set
+# RAY_DASHBOARD=1 to enable it, then tunnel from your workstation:
+#   ssh -L 8265:<head node>:8265 <cluster>
+#   open http://localhost:8265
+DASHBOARD_ARGS="--include-dashboard=false"
+if [[ "${RAY_DASHBOARD:-0}" == "1" ]]; then
+    DASHBOARD_ARGS="--include-dashboard=true --dashboard-host=0.0.0.0 --dashboard-port=${RAY_DASHBOARD_PORT:-8265}"
+fi
+
 echo "job     : $SLURM_JOB_ID"
 echo "head    : $HEAD_NODE ($RAY_ADDRESS)"
 echo "nodes   : $SLURM_JOB_NUM_NODES"
@@ -90,13 +110,15 @@ srun --nodes=1 --ntasks=1 -w "$HEAD_NODE" \
     "$VENV/bin/ray" start --head \
         --node-ip-address="$HEAD_IP" --port="$PORT" \
         --num-cpus="$WORKER_CPUS" --temp-dir="$RAY_TMPDIR" \
-        --include-dashboard=false --block &
+        --object-store-memory="$OBJECT_STORE_BYTES" \
+        $DASHBOARD_ARGS --block &
 sleep 20
 
 for (( i = 1; i < SLURM_JOB_NUM_NODES; i++ )); do
     srun --nodes=1 --ntasks=1 -w "${NODES[$i]}" \
         "$VENV/bin/ray" start --address="$RAY_ADDRESS" \
-            --num-cpus="$WORKER_CPUS" --temp-dir="$RAY_TMPDIR" --block &
+            --num-cpus="$WORKER_CPUS" --temp-dir="$RAY_TMPDIR" \
+            --object-store-memory="$OBJECT_STORE_BYTES" --block &
     sleep 5
 done
 
