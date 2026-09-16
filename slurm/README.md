@@ -142,22 +142,73 @@ long jobs.
 
 ## 4. Monitoring
 
+Three independent signals. Use more than one — a quiet log does not mean a
+stalled job, and a running SLURM job does not mean work is happening.
+
+### The watcher
+
 ```bash
-squeue -u $USER
-tail -f logs/rhapso-fuse-<jobid>.out       # progress prints every 5%
+slurm/watch_progress.sh <jobid>            # one snapshot
+slurm/watch_progress.sh <jobid> --watch    # refresh every 30s
 ```
 
-The driver prints the cluster it attached to before starting, which is the
-quickest way to confirm all your nodes joined:
+```
+=== job 123456 @ 14:02:11 ===
+     JOBID     STATE       TIME  TIME_LEFT  NODES NODELIST
+    123456   RUNNING      42:17    7:17:43      4 acn[07-10]
+  log      : 180/400 blocks (45%)
+  rate     : 4.3 blocks/min  (elapsed 42 min)
+  eta      : ~51 min for 220 blocks
+  store    : 137 shards in /scratch/you/fused.zarr
+  last write: 8s ago
+  size     : 3.1G
+```
+
+`rate`/`eta` come from the driver's own block counter with elapsed time taken
+from SLURM. `last write` is the liveness check — it flags `STALLED?` if nothing
+has been written for 10 minutes while the job is still RUNNING, which is how a
+hung S3 read or a wedged worker shows up.
+
+Shards will always be fewer than blocks: a block covering no tile writes
+nothing. That is expected, not data loss.
+
+### The log
+
+```bash
+tail -f logs/rhapso-fuse-<jobid>.out
+```
+
+The driver prints its plan at startup, then progress every 5%. The line to
+check first confirms the whole cluster joined:
 
 ```
-Ray cluster    : 124 CPUs across 4 node(s)
+Ray cluster    : 60 CPUs across 4 node(s)
 ```
 
-If that says 1 node, the workers failed to register — check `RAY_TMPDIR`
-(below) first.
+If that says 1 node, the workers never registered — check `RAY_TMPDIR` is
+node-local before anything else.
 
----
+### The Ray dashboard
+
+Off by default. Enable it and tunnel in:
+
+```bash
+RAY_DASHBOARD=1 sbatch slurm/fuse_mat_tiles.sbatch
+# find the head node in the log, then from your workstation:
+ssh -L 8265:<head node>:8265 <cluster>
+# open http://localhost:8265
+```
+
+Worth it when diagnosing rather than just tracking: it shows per-node CPU and
+memory, task failures with tracebacks, and whether workers are running or
+blocked on I/O. For this pipeline, workers sitting near-idle on CPU is normal —
+the job is network-bound.
+
+`ray status` also works from inside the allocation:
+
+```bash
+srun --jobid=<jobid> --overlap --nodes=1 --ntasks=1 .venv/bin/ray status
+```
 
 ## 5. Things that bite
 

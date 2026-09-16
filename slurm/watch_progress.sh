@@ -82,9 +82,10 @@ PYEOF
 
     # The store is the liveness check: is anything still being written?
     if [[ -n "${out:-}" && -d "$out/0/c" ]]; then
-        python3 - "$out" <<'PYEOF'
+        python3 - "$out" "${slurm_elapsed:-}" <<'PYEOF'
 import os, sys, time
 out = sys.argv[1]
+running = bool(sys.argv[2])
 newest, n = 0.0, 0
 for root, _, files in os.walk(os.path.join(out, "0", "c")):
     for f in files:
@@ -93,7 +94,8 @@ for root, _, files in os.walk(os.path.join(out, "0", "c")):
 print(f"  store    : {n} shards in {out}")
 if n:
     age = time.time() - newest
-    flag = "  <-- STALLED?" if age > 600 else ""
+    # Only meaningful while the job is actually running.
+    flag = "  <-- STALLED?" if (running and age > 600) else ""
     print(f"  last write: {age:.0f}s ago{flag}")
 PYEOF
         du -sh "$out" 2>/dev/null | awk '{print "  size     : "$1}'
