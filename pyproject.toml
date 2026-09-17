@@ -14,6 +14,7 @@ dependencies = [
     "obstore>=0.8",
     "h5py>=3.11",
     "pyyaml>=6.0",
+    "neuroglancer>=2.40",
 ]
 
 [project.scripts]
@@ -22,6 +23,9 @@ fuse-mat-tiles = "rhapso_mat_examples.fuse_mat_tiles:main"
 make-demo-tiles = "rhapso_mat_examples.make_demo_tiles:main"
 fuse-demo-tiles = "rhapso_mat_examples.fuse_tiles:main"
 serve-zarr = "rhapso_mat_examples.serve_zarr:main"
+ng-tile-link = "rhapso_mat_examples.ng_tile_link:main"
+register-seams = "rhapso_mat_examples.register_seams:main"
+ng-state-metrics = "rhapso_mat_examples.state_metrics:main"
 
 [build-system]
 requires = ["hatchling"]
