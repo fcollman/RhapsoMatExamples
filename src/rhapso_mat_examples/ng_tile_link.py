@@ -5,7 +5,11 @@ Each tile becomes a separate source under a single layer, carrying its own
 affine transform: the tile's mosaic offset, the voxel size, and an optional
 small tilt that corrects Z drift across the mosaic.
 
-    # best: measured per-tile offsets from register-seams
+    # best: a Rhapso solve -- rigid/affine rotation included, not just translation
+    psoct-stitch --out work/run --run-type translation
+    ng-tile-link --rhapso-xml work/run/solved_translation.xml
+
+    # measured per-tile offsets from register-seams (translation only)
     register-seams --out offsets.json
     ng-tile-link --offsets offsets.json
 
@@ -176,8 +180,18 @@ z=8 to z=90 between tiles) dominates the scatter, leaving it 0.7 sigma from
 flat in x and 1.7 in y. More tiles will not help; 24 still leaves it under
 2 sigma.
 
-``--offsets FILE`` takes fully measured per-tile (x, y, z) from register-seams
-and supersedes all of the above. ``--z-offsets FILE`` adds z-only nudges on
+``--rhapso-xml FILE`` takes a Rhapso alignment XML -- psoct_stitch.py's own
+naive.xml, or a solved_*.xml from Rhapso's solver -- and supersedes all of the
+above, including ``--manifest``/``--offsets``: the tile list AND every
+placement come from that one file. Unlike ``--offsets``, which is translation
+only, this carries whatever Rhapso actually solved for -- rigid or affine
+rotation included -- because it reads each tile's full composed 4x4, not just
+a translation vector. See ``load_rhapso_xml`` for the physical-vs-pixel-space
+conjugation this requires: Rhapso solves entirely in pixel-index space, while
+Neuroglancer's matrix acts on physical coordinates, and those only coincide
+when every axis has the same voxel size, which x/y/z here do not (5, 5, 3.4
+um). ``--offsets FILE`` takes fully measured per-tile (x, y, z) from
+register-seams, translation only. ``--z-offsets FILE`` adds z-only nudges on
 top of a modelled tilt.
 
 Either way it is ONE transform of the whole mosaic frame about a single pivot
@@ -253,9 +267,12 @@ class Tile:
 
     url: str
     name: str
-    x: float  # mosaic offset, in pixels
+    x: float  # mosaic offset, in pixels -- for --rhapso-xml, the translation column
     y: float
-    z: float = 0.0  # only non-zero when --offsets supplies a measured z
+    z: float = 0.0  # only non-zero when --offsets or --rhapso-xml supplies a measured z
+    matrix: np.ndarray | None = None  # 3x3, pixel-index space; None means identity.
+    # Only --rhapso-xml sets this: a solved rigid/affine model rotates as well as
+    # translates, which x/y/z alone cannot express.
 
 
 def list_s3_tiles(bucket: str, prefix: str) -> list[str]:
@@ -383,6 +400,68 @@ def load_offsets(path: str) -> dict[int, tuple[float, float, float]]:
     return out
 
 
+def load_rhapso_xml(path: str, bucket: str, prefix: str) -> list[Tile]:
+    """
+    Read tile placements straight from a Rhapso alignment XML -- either the naive
+    layout psoct_stitch.py wrote, or the solved output of Rhapso/pipelines/ray/solver.py
+    (rigid, affine, or translation-only), all of which share the same shape.
+
+    Rhapso solves entirely in full-resolution PIXEL-INDEX space -- every correspondence,
+    every ViewTransform/affine, is a pixel-to-pixel relationship with no physical-unit
+    conversion anywhere in the pipeline. Composing all of a view's ViewTransform entries
+    in document order (SaveResults prepends the solved delta ahead of whatever
+    registration was already there, matching Rhapso/affine_fusion/compute_bbox.py's own
+    left-to-right composition) gives that tile's full voxel-index -> mosaic-pixel-index
+    affine: pixel_out = M @ pixel_in + t.
+
+    Neuroglancer's matrix instead acts on PHYSICAL coordinates (see source_transform's
+    own docstring), so plugging M in raw would only be correct if every axis had the same
+    voxel size. Because x/y are 5 um and z is 3.4 um here, an M with real rotation needs
+    conjugating by the per-axis scale ratio: matrix[i][j] = M[i][j] * res[i] / res[j].
+    Verified against the physical-coordinate identity Neuroglancer actually evaluates,
+    not assumed -- get this wrong and a rotated tile silently lands in the wrong place
+    while a pure-translation tile (M = I) still looks fine, since every ratio there is 1.
+    The translation column needs no such conjugation: Neuroglancer already multiplies it
+    by outputScale, the same as the naive grid path's own translation.
+    """
+    root = ET.parse(path).getroot()
+
+    tiles = []
+    for view_setup in root.findall(".//ViewSetup"):
+        setup_text = view_setup.findtext("id")
+        name = view_setup.findtext("name")
+        if setup_text is None or name is None:
+            raise SystemExit(f"{path}: a <ViewSetup> is missing <id> or <name>")
+        setup = int(setup_text)
+
+        registration = root.find(f".//ViewRegistration[@setup='{setup}']")
+        matrix = np.eye(4)
+        if registration is not None:
+            for transform in registration.findall("ViewTransform"):
+                values = np.fromstring(
+                    (transform.findtext("affine") or "").replace(",", " "), sep=" "
+                )
+                if values.size != 12:
+                    continue
+                step = np.eye(4)
+                step[:3, :4] = values.reshape(3, 4)
+                matrix = matrix @ step
+
+        linear, translation = matrix[:3, :3], matrix[:3, 3]
+        tiles.append(
+            Tile(
+                url=zarr_url(bucket, prefix, name), name=name,
+                x=float(translation[0]), y=float(translation[1]),
+                z=float(translation[2]), matrix=linear,
+            )
+        )
+
+    if not tiles:
+        raise SystemExit(f"no <ViewSetup> entries found in {path}")
+
+    return tiles
+
+
 def metres(microns: float) -> float:
     """Microns to metres, without the 5.0*1e-6 -> 4.9999999999999996e-06 litter."""
     return float(f"{microns * 1e-6:.12g}")
@@ -471,17 +550,30 @@ def source_transform(
     for i, out_name in enumerate("xyz"):
         perm[i, dim_names.index(out_name)] = 1.0
 
-    # everything below is in x, y, z order; `res` converts px <-> um
     res = np.array(res_um, dtype=float)
-    offset_um = np.array([tile.x * res[0], tile.y * res[1], tile.z * res[2]])
-    pivot_um = pivot * res
 
-    linear = tilt @ perm  # dimensionless: physical in -> physical out
-    # physical_out = tilt @ (perm @ physical_in + offset - pivot) + pivot,
-    # so the tile offset is tilted along with everything else.
-    translation = (tilt @ offset_um + pivot_um - tilt @ pivot_um) / res
-    # step mode adds a flat per-tile z offset instead of shearing the interior
-    translation[2] += z_step_px
+    if tile.matrix is not None:
+        # A Rhapso-solved tile: matrix and (x, y, z) are already the full voxel-index
+        # -> mosaic-pixel-index affine, so the naive grid's tilt/pivot machinery does
+        # not apply here -- Rhapso's own solve already IS the correction. Rhapso works
+        # entirely in pixel-index space, so its linear block needs the per-axis scale
+        # ratio load_rhapso_xml's docstring derives (identity on the diagonal
+        # regardless, since res[i]/res[i] = 1 -- a pure-translation solve is
+        # unaffected; only real rotation/shear needs it).
+        pixel_linear = tile.matrix
+        linear = (pixel_linear * (res[:, None] / res[None, :])) @ perm
+        translation = np.array([tile.x, tile.y, tile.z])
+    else:
+        # everything below is in x, y, z order; `res` converts px <-> um
+        offset_um = np.array([tile.x * res[0], tile.y * res[1], tile.z * res[2]])
+        pivot_um = pivot * res
+
+        linear = tilt @ perm  # dimensionless: physical in -> physical out
+        # physical_out = tilt @ (perm @ physical_in + offset - pivot) + pivot,
+        # so the tile offset is tilted along with everything else.
+        translation = (tilt @ offset_um + pivot_um - tilt @ pivot_um) / res
+        # step mode adds a flat per-tile z offset instead of shearing the interior
+        translation[2] += z_step_px
 
     # rank rows of rank+1 columns; the channel row is an identity passthrough
     matrix = [[0.0] * (rank + 1) for _ in range(rank)]
@@ -599,6 +691,13 @@ def parse_args(argv=None):
     src.add_argument("--manifest",
                      help="YAML manifest to take tile offsets from, instead of "
                           "generating a grid")
+    src.add_argument("--rhapso-xml",
+                     help="a Rhapso alignment XML (psoct_stitch.py's naive.xml, or a "
+                          "solved_*.xml from Rhapso's solver) to take tile placement "
+                          "from directly -- rigid and affine rotation included, not "
+                          "just translation. Supersedes --manifest/--offsets/tilt "
+                          "entirely: the tile list and every placement come from this "
+                          "one file")
     src.add_argument("--no-list", action="store_true",
                      help="don't contact S3; synthesise tile names from "
                           "--slice/--tiles instead")
@@ -689,7 +788,17 @@ def main(argv=None) -> int:
     else:
         stride_x, stride_y = MEASURED_STRIDE
 
-    if args.manifest:
+    if args.rhapso_xml:
+        tiles = load_rhapso_xml(args.rhapso_xml, args.bucket, args.prefix)
+        if args.manifest or args.offsets:
+            print("note: --rhapso-xml supplies both the tile list and every "
+                  "placement; ignoring --manifest/--offsets", file=sys.stderr)
+        args.manifest = args.offsets = None
+        if not args.no_tilt:
+            print("note: --rhapso-xml already carries each tile's full solved "
+                  "transform, so the global tilt is switched off", file=sys.stderr)
+            args.no_tilt = True
+    elif args.manifest:
         tiles = load_manifest(args.manifest, args.bucket, args.prefix)
     else:
         if args.no_list:

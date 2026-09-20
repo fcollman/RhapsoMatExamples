@@ -26,6 +26,8 @@ serve-zarr = "rhapso_mat_examples.serve_zarr:main"
 ng-tile-link = "rhapso_mat_examples.ng_tile_link:main"
 register-seams = "rhapso_mat_examples.register_seams:main"
 ng-state-metrics = "rhapso_mat_examples.state_metrics:main"
+psoct-virtual = "rhapso_mat_examples.psoct_virtual:main"
+psoct-stitch = "rhapso_mat_examples.psoct_stitch:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -34,10 +36,19 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/rhapso_mat_examples"]
 
-# Rhapso comes from PyPI. To develop against a local checkout instead, add:
-#   [tool.uv.sources]
+# Rhapso is pinned to a tag on the fcollman fork rather than PyPI, since the
+# phase-correlation matcher (OverlapCutouts, PhaseCorrelation, the translation-only
+# solve) this project depends on has not been released upstream. vPhaseCorr1 is that
+# fork's phase-correlation branch as of the tag -- move the tag forward (or point at a
+# commit/branch) as that work evolves; don't just track the branch head silently, since
+# an unpinned dependency here would make this project's own behaviour drift without a
+# corresponding change in this repo to explain it.
+#
+# To develop against a local checkout instead, replace the entry below with:
 #   rhapso = { path = "../Rhapso", editable = true }
-# The overrides below are needed either way.
+# The overrides further down are needed either way.
+[tool.uv.sources]
+rhapso = { git = "https://github.com/fcollman/Rhapso.git", tag = "vPhaseCorr1" }
 
 [tool.uv]
 # Rhapso's pins cannot coexist with the VirtualiZarr/Icechunk stack as written.
